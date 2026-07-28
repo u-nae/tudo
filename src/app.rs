@@ -182,6 +182,12 @@ pub enum RowRef {
     Sub(usize, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchHit {
+    pub group: usize,
+    pub row: RowRef,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputTarget {
     #[default]
@@ -255,6 +261,9 @@ pub struct App {
     pub search_query: String,
 
     #[serde(skip)]
+    pub search_selected: usize,
+
+    #[serde(skip)]
     pub category_cursor: usize,
 
     #[serde(skip)]
@@ -278,6 +287,7 @@ impl Default for App {
             last_deleted: None,
             notes_buffer: String::new(),
             search_query: String::new(),
+            search_selected: 0,
             category_cursor: 0,
             group_editing: None,
             timer: None,
@@ -291,6 +301,35 @@ struct LegacyApp {
     todos: Vec<TodoItem>,
     #[serde(default)]
     selected: usize,
+}
+
+fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let candidate: Vec<char> = candidate.to_lowercase().chars().collect();
+    let query: Vec<char> = query.to_lowercase().chars().collect();
+    let mut score = 0i64;
+    let mut from = 0usize;
+    let mut previous = None;
+
+    for needle in &query {
+        let offset = candidate.get(from..)?.iter().position(|c| c == needle)?;
+        let index = from + offset;
+        score += 10;
+        if previous.is_some_and(|previous| previous + 1 == index) {
+            score += 15;
+        }
+        if previous.is_none() {
+            score -= index as i64;
+        }
+        previous = Some(index);
+        from = index + 1;
+    }
+
+    score -= candidate.len().saturating_sub(query.len()) as i64;
+    Some(score)
 }
 
 impl App {
@@ -819,28 +858,108 @@ impl App {
     }
 
     pub fn enter_search_mode(&mut self) {
+        self.search_query.clear();
+        self.search_selected = 0;
         self.mode = AppMode::Search;
     }
 
     pub fn push_search(&mut self, c: char) {
         self.search_query.push(c);
-        self.clamp_selection();
+        self.search_selected = 0;
     }
 
     pub fn backspace_search(&mut self) {
         self.search_query.pop();
-        self.clamp_selection();
+        self.search_selected = 0;
+    }
+
+    pub fn global_search_results(&self) -> Vec<SearchHit> {
+        let query = self.search_query.trim();
+        let mut scored = Vec::new();
+        let mut order = 0usize;
+
+        for (group_index, group) in self.groups.iter().enumerate() {
+            let group_score = fuzzy_score(&group.name, query);
+
+            for (todo_index, todo) in group.todos.iter().enumerate() {
+                let todo_score = fuzzy_score(&todo.title, query);
+                if let Some(score) = [group_score, todo_score].into_iter().flatten().max() {
+                    scored.push((
+                        score,
+                        order,
+                        SearchHit {
+                            group: group_index,
+                            row: RowRef::Todo(todo_index),
+                        },
+                    ));
+                }
+                order += 1;
+
+                for (subtask_index, subtask) in todo.subtasks.iter().enumerate() {
+                    let subtask_score = fuzzy_score(&subtask.title, query);
+                    if let Some(score) = [group_score, todo_score, subtask_score]
+                        .into_iter()
+                        .flatten()
+                        .max()
+                    {
+                        scored.push((
+                            score,
+                            order,
+                            SearchHit {
+                                group: group_index,
+                                row: RowRef::Sub(todo_index, subtask_index),
+                            },
+                        ));
+                    }
+                    order += 1;
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, _, hit)| hit).collect()
+    }
+
+    pub fn move_search_down(&mut self) {
+        let count = self.global_search_results().len();
+        if count > 0 {
+            self.search_selected = (self.search_selected + 1).min(count - 1);
+        }
+    }
+
+    pub fn move_search_up(&mut self) {
+        self.search_selected = self.search_selected.saturating_sub(1);
     }
 
     pub fn confirm_search(&mut self) {
+        let Some(hit) = self
+            .global_search_results()
+            .get(self.search_selected)
+            .copied()
+        else {
+            return;
+        };
+
+        if let RowRef::Sub(todo_index, _) = hit.row
+            && let Some(todo) = self
+                .groups
+                .get_mut(hit.group)
+                .and_then(|group| group.todos.get_mut(todo_index))
+        {
+            todo.collapsed = false;
+        }
+
+        self.selected_group = hit.group;
+        self.search_query.clear();
+        self.search_selected = 0;
         self.mode = AppMode::Normal;
-        self.clamp_selection();
+        self.select_row(hit.row);
     }
 
     pub fn cancel_search(&mut self) {
         self.search_query.clear();
+        self.search_selected = 0;
         self.mode = AppMode::Normal;
-        self.clamp_selection();
     }
 
     pub fn next_group(&mut self) {
@@ -1111,5 +1230,99 @@ mod tests {
         assert_eq!(app.mode, AppMode::Normal);
         assert!(app.timer.is_none());
         assert_eq!(app.groups[0].todos[0].pomodoros, 1);
+    }
+
+    #[test]
+    fn global_search_finds_items_across_groups_and_inside_collapsed_todos() {
+        let app = App {
+            groups: vec![
+                Group {
+                    name: "업무".into(),
+                    todos: vec![TodoItem::new("API 문서 정리")],
+                },
+                Group {
+                    name: "개인".into(),
+                    todos: vec![TodoItem {
+                        subtasks: vec![SubTask::new("Rust 소유권 복습")],
+                        collapsed: true,
+                        ..TodoItem::new("학습 계획")
+                    }],
+                },
+            ],
+            search_query: "rust".into(),
+            ..App::default()
+        };
+
+        assert_eq!(
+            app.global_search_results(),
+            vec![SearchHit {
+                group: 1,
+                row: RowRef::Sub(0, 0),
+            }]
+        );
+    }
+
+    #[test]
+    fn fuzzy_search_matches_subsequences_and_ranks_tighter_matches_first() {
+        assert!(fuzzy_score("Refactor timer", "rft").is_some());
+        assert!(
+            fuzzy_score("rust", "rust").unwrap()
+                > fuzzy_score("review rust notes", "rust").unwrap()
+        );
+    }
+
+    #[test]
+    fn confirming_global_search_moves_to_result_and_expands_parent() {
+        let mut app = App {
+            groups: vec![
+                Group::new("업무"),
+                Group {
+                    name: "개인".into(),
+                    todos: vec![TodoItem {
+                        subtasks: vec![SubTask::new("Rust 소유권 복습")],
+                        collapsed: true,
+                        ..TodoItem::new("학습 계획")
+                    }],
+                },
+            ],
+            ..App::default()
+        };
+        app.enter_search_mode();
+        app.search_query = "소유권".into();
+
+        app.confirm_search();
+
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.selected_group, 1);
+        assert_eq!(app.current_row(), Some(RowRef::Sub(0, 0)));
+        assert!(!app.groups[1].todos[0].collapsed);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn canceling_global_search_preserves_original_location() {
+        let mut app = App {
+            groups: vec![
+                Group {
+                    name: "업무".into(),
+                    todos: vec![TodoItem::new("첫 작업"), TodoItem::new("둘째 작업")],
+                },
+                Group {
+                    name: "개인".into(),
+                    todos: vec![TodoItem::new("개인 작업")],
+                },
+            ],
+            selected: 1,
+            ..App::default()
+        };
+        app.enter_search_mode();
+        app.push_search('개');
+
+        app.cancel_search();
+
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.selected_group, 0);
+        assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
+        assert!(app.search_query.is_empty());
     }
 }

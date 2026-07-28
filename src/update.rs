@@ -191,6 +191,8 @@ fn handle_search_mode(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Enter => app.confirm_search(),
         KeyCode::Esc => app.cancel_search(),
+        KeyCode::Up => app.move_search_up(),
+        KeyCode::Down => app.move_search_down(),
         KeyCode::Backspace => app.backspace_search(),
         KeyCode::Char(c) => app.push_search(c),
         _ => {}

@@ -820,17 +820,92 @@ fn render_search(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(area);
 
-    render_tab_bar(frame, app, chunks[0]);
-    render_content(frame, app, chunks[1]);
-    render_search_box(frame, app, chunks[2]);
-    render_footer(frame, chunks[3], FooterMode::Search);
+    render_search_results(frame, app, chunks[0]);
+    render_search_box(frame, app, chunks[1]);
+    render_footer(frame, chunks[2], FooterMode::Search);
+}
+
+fn render_search_results(frame: &mut Frame, app: &App, area: Rect) {
+    let hits = app.global_search_results();
+    let title = if app.search_query.trim().is_empty() {
+        format!(" 전체 항목 · {}개 ", hits.len())
+    } else {
+        format!(" 전체 그룹 검색 · {}개 결과 ", hits.len())
+    };
+    let panel = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+
+    if hits.is_empty() {
+        frame.render_widget(
+            Paragraph::new("검색 결과가 없습니다.")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = hits
+        .iter()
+        .filter_map(|hit| {
+            let group = app.groups.get(hit.group)?;
+            let group_path = Span::styled(
+                format!("{}  ›  ", group.name),
+                Style::default().fg(Color::DarkGray),
+            );
+            match hit.row {
+                RowRef::Todo(todo_index) => {
+                    let todo = group.todos.get(todo_index)?;
+                    Some(ListItem::new(Line::from(vec![
+                        group_path,
+                        search_status_span(todo.status),
+                        Span::raw(todo.title.clone()),
+                    ])))
+                }
+                RowRef::Sub(todo_index, subtask_index) => {
+                    let todo = group.todos.get(todo_index)?;
+                    let subtask = todo.subtasks.get(subtask_index)?;
+                    Some(ListItem::new(Line::from(vec![
+                        group_path,
+                        Span::styled(
+                            format!("{}  ›  ", todo.title),
+                            Style::default().fg(Color::Gray),
+                        ),
+                        search_status_span(subtask.status),
+                        Span::raw(subtask.title.clone()),
+                    ])))
+                }
+            }
+        })
+        .collect();
+
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = ListState::default();
+    state.select(Some(app.search_selected));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn search_status_span(status: TodoStatus) -> Span<'static> {
+    match status {
+        TodoStatus::Todo => Span::styled("[ ] ", Style::default().fg(Color::White)),
+        TodoStatus::InProgress => Span::styled("[>] ", Style::default().fg(Color::Cyan)),
+        TodoStatus::Done => Span::styled("[x] ", Style::default().fg(Color::Green)),
+    }
 }
 
 fn render_search_box(frame: &mut Frame, app: &App, area: Rect) {
@@ -859,7 +934,9 @@ fn render_footer(frame: &mut Frame, area: Rect, mode: FooterMode) {
         FooterMode::EditingNotes => {
             "[ Ctrl+S ] 메모 저장  [ Esc ] 취소  [ Enter ] 줄 바꿈  [ Backspace ] 삭제"
         }
-        FooterMode::Search => "[ Enter ] 검색 확정  [ Esc ] 검색 해제  [ 문자 ] 실시간 필터",
+        FooterMode::Search => {
+            "[ ↑/↓ ] 결과 이동  [ Enter ] 항목으로 이동  [ Esc ] 취소  [ 문자 ] Fuzzy 검색"
+        }
     };
 
     let footer = Paragraph::new(text)
