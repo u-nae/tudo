@@ -67,6 +67,9 @@ pub struct SubTask {
 
     #[serde(default, alias = "completed", deserialize_with = "de_status_compat")]
     pub status: TodoStatus,
+
+    #[serde(default)]
+    pub notes: String,
 }
 
 impl SubTask {
@@ -74,6 +77,7 @@ impl SubTask {
         Self {
             title: title.into(),
             status: TodoStatus::default(),
+            notes: String::new(),
         }
     }
 }
@@ -781,27 +785,58 @@ impl App {
     }
 
     pub fn enter_notes_mode(&mut self) {
-        let Some(RowRef::Todo(i)) = self.current_row() else {
+        let Some(row) = self.current_row() else {
             return;
         };
-        if let Some(group) = self.groups.get(self.selected_group) {
-            self.notes_buffer = group.todos[i].notes.clone();
-            self.mode = AppMode::EditingNotes;
-        }
+        let Some(group) = self.groups.get(self.selected_group) else {
+            return;
+        };
+        let notes = match row {
+            RowRef::Todo(i) => group.todos.get(i).map(|todo| todo.notes.as_str()),
+            RowRef::Sub(i, j) => group
+                .todos
+                .get(i)
+                .and_then(|todo| todo.subtasks.get(j))
+                .map(|subtask| subtask.notes.as_str()),
+        };
+        let Some(notes) = notes else {
+            return;
+        };
+
+        self.notes_buffer = notes.to_owned();
+        self.mode = AppMode::EditingNotes;
     }
 
     pub fn commit_notes(&mut self) {
-        let Some(RowRef::Todo(i)) = self.current_row() else {
+        let Some(row) = self.current_row() else {
             self.mode = AppMode::Normal;
+            self.notes_buffer.clear();
             return;
         };
-        if let Some(group) = self.groups.get_mut(self.selected_group) {
-            if group.todos[i].notes != self.notes_buffer {
-                group.todos[i].notes = std::mem::take(&mut self.notes_buffer);
-                self.dirty = true;
-            } else {
-                self.notes_buffer.clear();
-            }
+        let Some(group) = self.groups.get_mut(self.selected_group) else {
+            self.mode = AppMode::Normal;
+            self.notes_buffer.clear();
+            return;
+        };
+        let notes = match row {
+            RowRef::Todo(i) => group.todos.get_mut(i).map(|todo| &mut todo.notes),
+            RowRef::Sub(i, j) => group
+                .todos
+                .get_mut(i)
+                .and_then(|todo| todo.subtasks.get_mut(j))
+                .map(|subtask| &mut subtask.notes),
+        };
+        let Some(notes) = notes else {
+            self.mode = AppMode::Normal;
+            self.notes_buffer.clear();
+            return;
+        };
+
+        if *notes != self.notes_buffer {
+            *notes = std::mem::take(&mut self.notes_buffer);
+            self.dirty = true;
+        } else {
+            self.notes_buffer.clear();
         }
         self.mode = AppMode::Normal;
     }
@@ -809,6 +844,20 @@ impl App {
     pub fn cancel_notes(&mut self) {
         self.notes_buffer.clear();
         self.mode = AppMode::Normal;
+    }
+
+    pub fn current_notes(&self) -> Option<&str> {
+        let row = self.current_row()?;
+        let group = self.groups.get(self.selected_group)?;
+        match row {
+            RowRef::Todo(i) => group.todos.get(i).map(|todo| todo.notes.as_str()),
+            RowRef::Sub(i, j) => group
+                .todos
+                .get(i)?
+                .subtasks
+                .get(j)
+                .map(|subtask| subtask.notes.as_str()),
+        }
     }
 
     pub fn visible_rows(&self) -> Vec<RowRef> {
@@ -1324,5 +1373,59 @@ mod tests {
         assert_eq!(app.selected_group, 0);
         assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
         assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn legacy_subtask_without_notes_deserializes_with_empty_notes() {
+        let subtask: SubTask =
+            serde_json::from_str(r#"{"title":"기존 하위 작업","status":"Todo"}"#).unwrap();
+
+        assert!(subtask.notes.is_empty());
+    }
+
+    #[test]
+    fn subtask_notes_can_be_opened_and_committed() {
+        let mut app = app_with_todo();
+        app.selected = 1;
+
+        app.enter_notes_mode();
+        assert_eq!(app.mode, AppMode::EditingNotes);
+        assert!(app.notes_buffer.is_empty());
+
+        app.notes_buffer = "하위 작업 메모".into();
+        app.commit_notes();
+
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.groups[0].todos[0].subtasks[0].notes, "하위 작업 메모");
+        assert_eq!(app.current_notes(), Some("하위 작업 메모"));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn canceling_subtask_notes_preserves_original_content() {
+        let mut app = app_with_todo();
+        app.groups[0].todos[0].subtasks[0].notes = "원본".into();
+        app.selected = 1;
+
+        app.enter_notes_mode();
+        app.notes_buffer.push_str(" 변경");
+        app.cancel_notes();
+
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.current_notes(), Some("원본"));
+        assert!(app.notes_buffer.is_empty());
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn todo_notes_still_use_the_same_editing_flow() {
+        let mut app = app_with_todo();
+
+        app.enter_notes_mode();
+        app.notes_buffer = "상위 작업 메모".into();
+        app.commit_notes();
+
+        assert_eq!(app.groups[0].todos[0].notes, "상위 작업 메모");
+        assert_eq!(app.current_notes(), Some("상위 작업 메모"));
     }
 }

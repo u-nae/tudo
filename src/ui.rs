@@ -304,11 +304,13 @@ fn render_list_pane(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_notes_pane(frame: &mut Frame, app: &App, area: Rect) {
     let is_editing = app.mode == AppMode::EditingNotes;
+    let is_subtask = matches!(app.current_row(), Some(RowRef::Sub(_, _)));
 
-    let (title, border_color) = if is_editing {
-        (" 메모 (편집 중) ", Color::Yellow)
-    } else {
-        (" 메모 ", Color::DarkGray)
+    let (title, border_color) = match (is_editing, is_subtask) {
+        (true, true) => (" 하위 할 일 메모 (편집 중) ", Color::Yellow),
+        (true, false) => (" 메모 (편집 중) ", Color::Yellow),
+        (false, true) => (" 하위 할 일 메모 ", Color::DarkGray),
+        (false, false) => (" 메모 ", Color::DarkGray),
     };
 
     let panel = Block::default()
@@ -527,50 +529,41 @@ fn render_notes_content(frame: &mut Frame, app: &App, area: Rect) {
     let content = if is_editing {
         app.notes_buffer.as_str()
     } else {
-        match app.current_row() {
-            Some(RowRef::Todo(i)) => app
-                .current_todos()
-                .get(i)
-                .map(|item| item.notes.as_str())
-                .unwrap_or(""),
-            _ => "",
-        }
+        app.current_notes().unwrap_or("")
     };
 
     if content.is_empty() && !is_editing {
-        let message = if matches!(app.current_row(), Some(RowRef::Sub(_, _))) {
-            "하위 할 일에는 메모가 없습니다."
-        } else {
-            "[ m ] 키로 메모를 작성하세요."
-        };
-        let placeholder = Paragraph::new(message).style(Style::default().fg(Color::DarkGray));
+        let placeholder = Paragraph::new("[ m ] 키로 메모를 작성하세요.")
+            .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(placeholder, area);
+        return;
+    }
+
+    let style = if is_editing {
+        Style::default().fg(Color::Yellow)
     } else {
-        let style = if is_editing {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::White)
-        };
+        Style::default().fg(Color::White)
+    };
 
-        let safe_width = area.width.max(1);
-        let wrapped_lines = wrap_text(content, safe_width);
+    let safe_width = area.width.max(1);
+    let wrapped_lines = wrap_text(content, safe_width);
 
-        let lines_for_widget: Vec<Line> = wrapped_lines
-            .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), style)))
-            .collect();
-        let notes_widget = Paragraph::new(lines_for_widget);
-        frame.render_widget(notes_widget, area);
+    let lines_for_widget: Vec<Line> = wrapped_lines
+        .iter()
+        .map(|line| Line::from(Span::styled(line.clone(), style)))
+        .collect();
 
-        if is_editing {
-            let last_line = wrapped_lines.last().unwrap_or(&String::new()).clone();
-            let cursor_x = area.x + last_line.width() as u16;
-            let cursor_y = area.y + wrapped_lines.len().saturating_sub(1) as u16;
-            frame.set_cursor_position((
-                cursor_x.min(area.right().saturating_sub(1)),
-                cursor_y.min(area.bottom().saturating_sub(1)),
-            ));
-        }
+    frame.render_widget(Paragraph::new(lines_for_widget), area);
+
+    if is_editing {
+        let last_line = wrapped_lines.last().cloned().unwrap_or_default();
+        let cursor_x = area.x + last_line.width() as u16;
+        let cursor_y = area.y + wrapped_lines.len().saturating_sub(1) as u16;
+
+        frame.set_cursor_position((
+            cursor_x.min(area.right().saturating_sub(1)),
+            cursor_y.min(area.bottom().saturating_sub(1)),
+        ));
     }
 }
 
