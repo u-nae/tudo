@@ -12,6 +12,9 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{error::Error, io, time::Instant};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let icon_setting = std::env::var("TUMETO_ICONS").ok();
+    let ui_config = ui::UiConfig::from_icon_setting(icon_setting.as_deref());
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
@@ -21,7 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::load();
-    let result = run_app(&mut terminal, &mut app);
+    let result = run_app(&mut terminal, &mut app, ui_config);
 
     disable_raw_mode()?;
     execute!(
@@ -38,7 +41,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    ui_config: ui::UiConfig,
+) -> io::Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
@@ -46,7 +53,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         app.tick_timer(now.saturating_duration_since(last_tick));
         last_tick = now;
 
-        terminal.draw(|frame| ui::render(frame, app))?;
+        terminal.draw(|frame| ui::render(frame, app, ui_config))?;
         update::handle_events(app)?;
 
         if app.dirty {

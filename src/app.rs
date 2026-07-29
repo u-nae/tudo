@@ -348,13 +348,15 @@ impl App {
             return Self::default();
         };
 
-        if value.get("groups").is_some() {
+        let app = if value.get("groups").is_some() {
             serde_json::from_value(value).unwrap_or_default()
         } else {
             serde_json::from_value::<LegacyApp>(value)
                 .map(Self::from_legacy)
                 .unwrap_or_default()
-        }
+        };
+
+        app.normalize_loaded_state()
     }
 
     fn from_legacy(legacy: LegacyApp) -> Self {
@@ -367,6 +369,24 @@ impl App {
             selected: legacy.selected,
             ..Self::default()
         }
+    }
+
+    fn normalize_loaded_state(mut self) -> Self {
+        let original_group = self.selected_group;
+        let original_selected = self.selected;
+        let mut repaired = false;
+
+        if self.groups.is_empty() {
+            self.groups.push(Group::new("기본"));
+            repaired = true;
+        }
+
+        self.selected_group = self.selected_group.min(self.groups.len() - 1);
+        self.clamp_selection();
+
+        self.dirty =
+            repaired || self.selected_group != original_group || self.selected != original_selected;
+        self
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -998,7 +1018,7 @@ impl App {
             todo.collapsed = false;
         }
 
-        self.selected_group = hit.group;
+        self.switch_group(hit.group);
         self.search_query.clear();
         self.search_selected = 0;
         self.mode = AppMode::Normal;
@@ -1015,23 +1035,25 @@ impl App {
         if self.groups.len() <= 1 {
             return;
         }
-        self.selected_group = (self.selected_group + 1) % self.groups.len();
-        self.reset_group_view();
+        let next = (self.selected_group + 1) % self.groups.len();
+        self.switch_group(next);
     }
 
     pub fn prev_group(&mut self) {
         if self.groups.len() <= 1 {
             return;
         }
-        self.selected_group = (self.selected_group + self.groups.len() - 1) % self.groups.len();
-        self.reset_group_view();
+        let previous = (self.selected_group + self.groups.len() - 1) % self.groups.len();
+        self.switch_group(previous);
     }
 
     pub fn switch_group(&mut self, index: usize) {
-        if index < self.groups.len() {
-            self.selected_group = index;
-            self.reset_group_view();
+        if index >= self.groups.len() || index == self.selected_group {
+            return;
         }
+        self.selected_group = index;
+        self.reset_group_view();
+        self.dirty = true;
     }
 
     fn reset_group_view(&mut self) {
@@ -1346,6 +1368,7 @@ mod tests {
         assert_eq!(app.current_row(), Some(RowRef::Sub(0, 0)));
         assert!(!app.groups[1].todos[0].collapsed);
         assert!(app.search_query.is_empty());
+        assert!(app.dirty);
     }
 
     #[test]
@@ -1427,5 +1450,80 @@ mod tests {
 
         assert_eq!(app.groups[0].todos[0].notes, "상위 작업 메모");
         assert_eq!(app.current_notes(), Some("상위 작업 메모"));
+    }
+
+    #[test]
+    fn selected_group_survives_a_json_round_trip() {
+        let app = App {
+            groups: vec![Group::new("업무"), Group::new("개인")],
+            selected_group: 1,
+            ..App::default()
+        };
+
+        let json = serde_json::to_string(&app).unwrap();
+        let restored: App = serde_json::from_str(&json).unwrap();
+        let restored = restored.normalize_loaded_state();
+
+        assert_eq!(restored.selected_group, 1);
+        assert!(!restored.dirty);
+    }
+
+    #[test]
+    fn group_navigation_marks_persistent_state_dirty_and_resets_the_view() {
+        let mut app = App {
+            groups: vec![Group::new("업무"), Group::new("개인")],
+            selected: 3,
+            search_query: "rust".into(),
+            ..App::default()
+        };
+
+        app.next_group();
+
+        assert_eq!(app.selected_group, 1);
+        assert_eq!(app.selected, 0);
+        assert!(app.search_query.is_empty());
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn switching_to_the_current_or_invalid_group_is_a_no_op() {
+        let mut app = App {
+            groups: vec![Group::new("업무"), Group::new("개인")],
+            ..App::default()
+        };
+
+        app.switch_group(0);
+        app.switch_group(99);
+
+        assert_eq!(app.selected_group, 0);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn loaded_state_repairs_empty_groups_and_out_of_range_selection() {
+        let empty = App {
+            groups: Vec::new(),
+            selected_group: 7,
+            selected: 9,
+            ..App::default()
+        }
+        .normalize_loaded_state();
+
+        assert_eq!(empty.groups.len(), 1);
+        assert_eq!(empty.selected_group, 0);
+        assert_eq!(empty.selected, 0);
+        assert!(empty.dirty);
+
+        let out_of_range = App {
+            groups: vec![Group::new("업무"), Group::new("개인")],
+            selected_group: 7,
+            selected: 9,
+            ..App::default()
+        }
+        .normalize_loaded_state();
+
+        assert_eq!(out_of_range.selected_group, 1);
+        assert_eq!(out_of_range.selected, 0);
+        assert!(out_of_range.dirty);
     }
 }
