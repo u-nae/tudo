@@ -18,6 +18,14 @@ impl Priority {
             Self::High => Self::Low,
         }
     }
+
+    fn display_sort_rank(&self) -> u8 {
+        match self {
+            Self::High => 0,
+            Self::Medium => 1,
+            Self::Low => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,7 +50,7 @@ impl TodoStatus {
         matches!(self, Self::Done)
     }
 
-    fn subtask_sort_rank(self) -> u8 {
+    fn display_sort_rank(self) -> u8 {
         match self {
             Self::InProgress => 0,
             Self::Todo => 1,
@@ -688,6 +696,7 @@ impl App {
             group.todos[i].priority = group.todos[i].priority.cycle();
             self.dirty = true;
         }
+        self.select_row(RowRef::Todo(i));
     }
 
     pub fn toggle_timer(&mut self) {
@@ -727,12 +736,17 @@ impl App {
         }
 
         self.timer = Some(PomodoroTimer::new(target));
+        self.select_row(RowRef::Todo(todo_index));
     }
 
     pub fn cancel_timer(&mut self) {
+        let selected_row = self.current_row();
         self.timer = None;
         if self.mode == AppMode::Zen {
             self.mode = AppMode::Normal;
+        }
+        if let Some(row) = selected_row {
+            self.select_row(row);
         }
     }
 
@@ -749,6 +763,7 @@ impl App {
         }
 
         let target = timer.target;
+        let selected_row = self.current_row();
         self.timer = None;
 
         if let Some(todo) = self
@@ -762,6 +777,9 @@ impl App {
 
         if self.mode == AppMode::Zen {
             self.mode = AppMode::Normal;
+        }
+        if let Some(row) = selected_row {
+            self.select_row(row);
         }
     }
 
@@ -792,6 +810,7 @@ impl App {
     }
 
     pub fn complete_active_timer_todo(&mut self) {
+        let selected_row = self.current_row();
         let Some(target) = self.timer.as_ref().map(|timer| timer.target) else {
             self.mode = AppMode::Normal;
             return;
@@ -811,6 +830,9 @@ impl App {
 
         self.timer = None;
         self.mode = AppMode::Normal;
+        if let Some(row) = selected_row {
+            self.select_row(row);
+        }
     }
 
     pub fn enter_notes_mode(&mut self) {
@@ -894,15 +916,41 @@ impl App {
             return Vec::new();
         };
         let query = self.search_query.to_lowercase();
+        let active_target = self.timer.as_ref().map(|timer| timer.target);
+        let mut todo_indices: Vec<_> = group
+            .todos
+            .iter()
+            .enumerate()
+            .filter(|(_, todo)| query.is_empty() || todo.title.to_lowercase().contains(&query))
+            .map(|(index, _)| index)
+            .collect();
+        todo_indices.sort_by_key(|&index| {
+            let todo = &group.todos[index];
+            let target = TimerTarget {
+                group: self.selected_group,
+                todo: index,
+            };
+            let active_timer_rank = u8::from(active_target != Some(target));
+            let priority_rank = if todo.status.is_done() {
+                0
+            } else {
+                todo.priority.display_sort_rank()
+            };
+
+            (
+                todo.status.display_sort_rank(),
+                active_timer_rank,
+                priority_rank,
+            )
+        });
+
         let mut rows = Vec::new();
-        for (i, todo) in group.todos.iter().enumerate() {
-            if !query.is_empty() && !todo.title.to_lowercase().contains(&query) {
-                continue;
-            }
+        for i in todo_indices {
+            let todo = &group.todos[i];
             rows.push(RowRef::Todo(i));
             if !todo.collapsed {
                 let mut subtask_indices: Vec<_> = (0..todo.subtasks.len()).collect();
-                subtask_indices.sort_by_key(|&j| todo.subtasks[j].status.subtask_sort_rank());
+                subtask_indices.sort_by_key(|&j| todo.subtasks[j].status.display_sort_rank());
                 for j in subtask_indices {
                     rows.push(RowRef::Sub(i, j));
                 }
@@ -1247,7 +1295,7 @@ mod tests {
         app.selected = 1;
         app.toggle_timer();
 
-        app.selected = 0;
+        app.select_row(RowRef::Todo(0));
         app.delete_selected();
         assert_eq!(app.timer.as_ref().unwrap().target.todo, 0);
         assert_eq!(app.active_timer_todo().unwrap().1.title, "집중할 작업");
@@ -1256,7 +1304,7 @@ mod tests {
         assert_eq!(app.timer.as_ref().unwrap().target.todo, 1);
         assert_eq!(app.active_timer_todo().unwrap().1.title, "집중할 작업");
 
-        app.selected = 1;
+        app.select_row(RowRef::Todo(1));
         app.delete_selected();
         assert!(app.timer.is_none());
     }
@@ -1538,6 +1586,119 @@ mod tests {
             TodoStatus::InProgress
         );
         assert_eq!(app.current_row(), Some(RowRef::Sub(0, 0)));
+    }
+
+    #[test]
+    fn visible_rows_sorts_todo_blocks_by_status_timer_and_priority() {
+        let todo = |title, status, priority| TodoItem {
+            status,
+            priority,
+            ..TodoItem::new(title)
+        };
+        let mut active = todo("타이머 진행 Low", TodoStatus::InProgress, Priority::Low);
+        active.subtasks = vec![
+            SubTask {
+                status: TodoStatus::Done,
+                ..SubTask::new("완료 하위")
+            },
+            SubTask {
+                status: TodoStatus::InProgress,
+                ..SubTask::new("진행 하위")
+            },
+        ];
+        let mut app = App::default();
+        app.groups[0].todos = vec![
+            todo("대기 Medium", TodoStatus::Todo, Priority::Medium),
+            todo("완료 High", TodoStatus::Done, Priority::High),
+            todo("진행 High", TodoStatus::InProgress, Priority::High),
+            todo("대기 High", TodoStatus::Todo, Priority::High),
+            active,
+            todo("대기 Low", TodoStatus::Todo, Priority::Low),
+            todo("완료 Low", TodoStatus::Done, Priority::Low),
+        ];
+        app.timer = Some(PomodoroTimer::new(TimerTarget { group: 0, todo: 4 }));
+
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                RowRef::Todo(4),
+                RowRef::Sub(4, 1),
+                RowRef::Sub(4, 0),
+                RowRef::Todo(2),
+                RowRef::Todo(3),
+                RowRef::Todo(0),
+                RowRef::Todo(5),
+                RowRef::Todo(1),
+                RowRef::Todo(6),
+            ]
+        );
+        assert_eq!(
+            app.groups[0]
+                .todos
+                .iter()
+                .map(|todo| todo.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "대기 Medium",
+                "완료 High",
+                "진행 High",
+                "대기 High",
+                "타이머 진행 Low",
+                "대기 Low",
+                "완료 Low",
+            ]
+        );
+    }
+
+    #[test]
+    fn cycling_todo_priority_keeps_the_same_todo_selected_after_sorting() {
+        let mut app = App::default();
+        app.groups[0].todos = vec![
+            TodoItem::new("기존 Low"),
+            TodoItem::new("우선순위를 바꿀 작업"),
+        ];
+        app.select_row(RowRef::Todo(1));
+
+        app.cycle_priority();
+
+        assert_eq!(app.groups[0].todos[1].priority, Priority::Medium);
+        assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
+        assert_eq!(app.visible_rows(), vec![RowRef::Todo(1), RowRef::Todo(0)]);
+    }
+
+    #[test]
+    fn cycling_todo_status_keeps_the_same_todo_selected_after_sorting() {
+        let mut high = TodoItem::new("대기 High");
+        high.priority = Priority::High;
+
+        let mut app = App::default();
+        app.groups[0].todos = vec![high, TodoItem::new("진행 중으로 바꿀 Low")];
+        app.select_row(RowRef::Todo(1));
+
+        app.cycle_status();
+
+        assert_eq!(app.groups[0].todos[1].status, TodoStatus::InProgress);
+        assert_eq!(app.visible_rows()[0], RowRef::Todo(1));
+        assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
+    }
+
+    #[test]
+    fn timer_sort_changes_keep_the_current_todo_selected() {
+        let mut high = TodoItem::new("기존 진행 High");
+        high.status = TodoStatus::InProgress;
+        high.priority = Priority::High;
+
+        let mut app = App::default();
+        app.groups[0].todos = vec![high, TodoItem::new("타이머를 시작할 Low")];
+        app.select_row(RowRef::Todo(1));
+
+        app.toggle_timer();
+        assert_eq!(app.visible_rows()[0], RowRef::Todo(1));
+        assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
+
+        app.cancel_timer();
+        assert_eq!(app.visible_rows()[0], RowRef::Todo(0));
+        assert_eq!(app.current_row(), Some(RowRef::Todo(1)));
     }
 
     #[test]
