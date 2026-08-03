@@ -41,6 +41,14 @@ impl TodoStatus {
     pub fn is_done(self) -> bool {
         matches!(self, Self::Done)
     }
+
+    fn subtask_sort_rank(self) -> u8 {
+        match self {
+            Self::InProgress => 0,
+            Self::Todo => 1,
+            Self::Done => 2,
+        }
+    }
 }
 
 fn de_status_compat<'de, D>(deserializer: D) -> Result<TodoStatus, D::Error>
@@ -448,6 +456,7 @@ impl App {
             self.timer = None;
         }
         self.dirty = true;
+        self.select_row(row);
     }
 
     pub fn delete_selected(&mut self) {
@@ -892,7 +901,9 @@ impl App {
             }
             rows.push(RowRef::Todo(i));
             if !todo.collapsed {
-                for j in 0..todo.subtasks.len() {
+                let mut subtask_indices: Vec<_> = (0..todo.subtasks.len()).collect();
+                subtask_indices.sort_by_key(|&j| todo.subtasks[j].status.subtask_sort_rank());
+                for j in subtask_indices {
                     rows.push(RowRef::Sub(i, j));
                 }
             }
@@ -1450,6 +1461,83 @@ mod tests {
 
         assert_eq!(app.groups[0].todos[0].notes, "상위 작업 메모");
         assert_eq!(app.current_notes(), Some("상위 작업 메모"));
+    }
+
+    #[test]
+    fn visible_rows_sorts_subtasks_by_status_without_reordering_storage() {
+        let mut todo = TodoItem::new("상위 작업");
+        todo.subtasks = vec![
+            SubTask {
+                status: TodoStatus::Todo,
+                ..SubTask::new("대기 1")
+            },
+            SubTask {
+                status: TodoStatus::Done,
+                ..SubTask::new("완료 1")
+            },
+            SubTask {
+                status: TodoStatus::InProgress,
+                ..SubTask::new("진행 1")
+            },
+            SubTask {
+                status: TodoStatus::Todo,
+                ..SubTask::new("대기 2")
+            },
+            SubTask {
+                status: TodoStatus::InProgress,
+                ..SubTask::new("진행 2")
+            },
+            SubTask {
+                status: TodoStatus::Done,
+                ..SubTask::new("완료 2")
+            },
+        ];
+        let mut app = App::default();
+        app.groups[0].todos.push(todo);
+
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                RowRef::Todo(0),
+                RowRef::Sub(0, 2),
+                RowRef::Sub(0, 4),
+                RowRef::Sub(0, 0),
+                RowRef::Sub(0, 3),
+                RowRef::Sub(0, 1),
+                RowRef::Sub(0, 5),
+            ]
+        );
+        assert_eq!(
+            app.groups[0].todos[0]
+                .subtasks
+                .iter()
+                .map(|subtask| subtask.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["대기 1", "완료 1", "진행 1", "대기 2", "진행 2", "완료 2"]
+        );
+    }
+
+    #[test]
+    fn cycling_subtask_status_keeps_the_same_subtask_selected_after_sorting() {
+        let mut todo = TodoItem::new("상위 작업");
+        todo.subtasks = vec![
+            SubTask::new("상태를 바꿀 작업"),
+            SubTask {
+                status: TodoStatus::InProgress,
+                ..SubTask::new("기존 진행 작업")
+            },
+        ];
+        let mut app = App::default();
+        app.groups[0].todos.push(todo);
+        app.select_row(RowRef::Sub(0, 0));
+
+        app.cycle_status();
+
+        assert_eq!(
+            app.groups[0].todos[0].subtasks[0].status,
+            TodoStatus::InProgress
+        );
+        assert_eq!(app.current_row(), Some(RowRef::Sub(0, 0)));
     }
 
     #[test]
